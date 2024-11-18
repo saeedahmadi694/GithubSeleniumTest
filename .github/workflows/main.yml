@@ -1,0 +1,80 @@
+name: Run Tests and Notify
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  run-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v3
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v3
+        with:
+          dotnet-version: '7.0.x' # Adjust to your .NET version
+
+      - name: Install Dependencies
+        run: dotnet restore
+
+      - name: Run Tests
+        id: run-tests
+        run: dotnet test --logger "trx;LogFileName=test-results.trx" --results-directory TestResults/
+        continue-on-error: true
+
+      - name: Parse Test Results
+        id: parse-results
+        if: failure()
+        run: |
+          echo "Parsing test results..."
+          RESULT_FILE=$(find TestResults/ -name 'test-results.trx')
+          TEST_OUTCOME=$(xmllint --xpath "string(//TestRun/ResultSummary/Counters/@outcome)" $RESULT_FILE || echo "Unknown")
+          TOTAL=$(xmllint --xpath "string(//TestRun/ResultSummary/Counters/@total)" $RESULT_FILE || echo "0")
+          PASSED=$(xmllint --xpath "string(//TestRun/ResultSummary/Counters/@passed)" $RESULT_FILE || echo "0")
+          FAILED=$(xmllint --xpath "string(//TestRun/ResultSummary/Counters/@failed)" $RESULT_FILE || echo "0")
+          SKIPPED=$(xmllint --xpath "string(//TestRun/ResultSummary/Counters/@skipped)" $RESULT_FILE || echo "0")
+
+          echo "Outcome=$TEST_OUTCOME" >> $GITHUB_ENV
+          echo "Total=$TOTAL" >> $GITHUB_ENV
+          echo "Passed=$PASSED" >> $GITHUB_ENV
+          echo "Failed=$FAILED" >> $GITHUB_ENV
+          echo "Skipped=$SKIPPED" >> $GITHUB_ENV
+
+      - name: Upload Test Results
+        if: failure()
+        uses: actions/upload-artifact@v3
+        with:
+          name: test-results
+          path: TestResults/
+
+      - name: Notify Test Failure
+        if: failure()
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "Creating or updating the failure issue with test summary..."
+          ISSUE_TITLE="⚠️ CI Test Failure Notification"
+          ISSUE_BODY="The latest tests on the \`main\` branch failed. Please review the test results.\n\n
+          ## Test Summary:
+          - **Outcome**: $TEST_OUTCOME
+          - **Total Tests**: $TOTAL
+          - **Passed**: $PASSED
+          - **Failed**: $FAILED
+          - **Skipped**: $SKIPPED
+
+          ## Details:
+          - The detailed results have been attached as an artifact."
+
+          EXISTING_ISSUE=$(gh issue list --search "$ISSUE_TITLE" --state open --json number --jq '.[0].number')
+
+          if [ -z "$EXISTING_ISSUE" ]; then
+            gh issue create --title "$ISSUE_TITLE" --body "$ISSUE_BODY"
+          else
+            gh issue comment $EXISTING_ISSUE --body "Tests failed again. See the latest summary:\n\n$ISSUE_BODY"
+          fi
